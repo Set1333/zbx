@@ -8,7 +8,10 @@ from tkcalendar import DateEntry
 from datetime import datetime, timedelta
 import tkinter.messagebox
 import json
+import requests
 
+# Disable SSL certificate verification
+requests.packages.urllib3.disable_warnings()
 
 class ZabbixExportGUI:
     def __init__(self, root):
@@ -72,18 +75,21 @@ class ZabbixExportGUI:
         self.end_date_entry = DateEntry(export_frame, textvariable=self.end_date, date_pattern="yyyy-mm-dd")
         self.end_date_entry.grid(row=4, column=1)
 
-        if self.start_date.get() or self.end_date.get():
-            ttk.Checkbutton(export_frame, text="Fetch All Attributes", variable=self.fetch_all_attributes).grid(row=5,
-                                                                                                                columnspan=2)
+        ttk.Checkbutton(export_frame, text="Errors Only", variable=self.errors_only).grid(row=5, columnspan=2)
 
-        # Checkbutton for fetching all attributes
+        # User email frame
         email_frame = ttk.LabelFrame(self.root, text="User Emails")
         email_frame.pack(pady=10)
 
         ttk.Label(email_frame, text="User IDs:").grid(row=0, column=0, sticky="w")
         ttk.Entry(email_frame, textvariable=self.user_ids).grid(row=0, column=1)
 
-        ttk.Button(email_frame, text="Fetch Emails", command=self.fetch_emails).grid(row=0, column=2)
+        # Checkbutton for fetching all attributes
+        self.fetch_all_checkbutton = ttk.Checkbutton(email_frame, text="Fetch All Attributes",
+                                                     variable=self.fetch_all_attributes)
+        self.fetch_all_checkbutton.grid(row=0, column=2)
+
+        ttk.Button(email_frame, text="Fetch Emails", command=self.fetch_emails).grid(row=0, column=3)
 
         # Export button
         ttk.Button(self.root, text="Export Triggers", command=self.export_triggers).pack(pady=10)
