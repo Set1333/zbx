@@ -1,254 +1,173 @@
 import tkinter as tk
-from tkinter import ttk
-from tkinter import filedialog
-from pyzabbix import ZabbixAPI
-from openpyxl import Workbook
-from openpyxl.styles import PatternFill
-from tkcalendar import DateEntry
-from datetime import datetime, timedelta
-import tkinter.messagebox
-import json
-import requests
+from tkinter import messagebox
+from pyzabbix import ZabbixAPI, ZabbixAPIException
+import datetime
+import openpyxl
+import ssl
 
-# Disable SSL certificate verification
-requests.packages.urllib3.disable_warnings()
+# Отключение проверки сертификата SSL (нужно только для самоподписанных сертификатов)
+ssl._create_default_https_context = ssl._create_unverified_context
 
-class ZabbixExportGUI:
-    def __init__(self, root):
-        self.root = root
-        self.root.title("Zabbix Triggers Export")
-        self.root.geometry("600x400")
+def get_triggers(zabbix_api, group=None, host=None, period_start=None, period_end=None):
+    # Формируем фильтры для запроса триггеров
+    filter_params = {}
+    if group:
+        filter_params['group'] = group
+    if host:
+        filter_params['host'] = host
 
-        # Load configuration
-        self.load_config()
+    # Получаем список триггеров с учетом фильтров
+    try:
+        triggers = zabbix_api.trigger.get(
+            output=['description', 'lastchange', 'priority', 'value', 'hosts'],
+            selectHosts=['host'],
+            filter=filter_params,
+            expandDescription=1,
+            monitored=1
+        )
+    except ZabbixAPIException as e:
+        messagebox.showerror('Error', f'Error fetching triggers: {e}')
+        return []
 
-        # Zabbix connection variables
-        self.zabbix_server = tk.StringVar(value=self.config.get('server', ''))
-        self.zabbix_user = tk.StringVar(value=self.config.get('user', ''))
-        self.zabbix_password = tk.StringVar(value=self.config.get('password', ''))
-
-        # Trigger export variables
-        self.group_id = tk.StringVar(value=self.config.get('group_id', ''))
-        self.server_name = tk.StringVar(value=self.config.get('server_name', ''))
-        self.due_date = tk.StringVar(value=self.config.get('due_date', ''))
-        self.start_date = tk.StringVar(value=self.config.get('start_date', ''))
-        self.end_date = tk.StringVar(value=self.config.get('end_date', ''))
-        self.errors_only = tk.BooleanVar(value=self.config.get('errors_only', False))
-
-        # User email variables
-        self.user_ids = tk.StringVar(value=self.config.get('user_ids', ''))
-        self.fetch_all_attributes = tk.BooleanVar(value=self.config.get('fetch_all_attributes', False))
-        self.user_emails = {}
-
-        # Zabbix connection frame
-        connection_frame = ttk.LabelFrame(self.root, text="Zabbix Connection")
-        connection_frame.pack(pady=10)
-
-        ttk.Label(connection_frame, text="Server URL:").grid(row=0, column=0, sticky="w")
-        ttk.Entry(connection_frame, textvariable=self.zabbix_server).grid(row=0, column=1)
-
-        ttk.Label(connection_frame, text="Username:").grid(row=1, column=0, sticky="w")
-        ttk.Entry(connection_frame, textvariable=self.zabbix_user).grid(row=1, column=1)
-
-        ttk.Label(connection_frame, text="Password:").grid(row=2, column=0, sticky="w")
-        ttk.Entry(connection_frame, textvariable=self.zabbix_password, show="*").grid(row=2, column=1)
-
-        # Trigger export frame
-        export_frame = ttk.LabelFrame(self.root, text="Trigger Export Parameters")
-        export_frame.pack(pady=10)
-
-        ttk.Label(export_frame, text="Group ID:").grid(row=0, column=0, sticky="w")
-        ttk.Entry(export_frame, textvariable=self.group_id).grid(row=0, column=1)
-
-        ttk.Label(export_frame, text="Server Name:").grid(row=1, column=0, sticky="w")
-        ttk.Entry(export_frame, textvariable=self.server_name).grid(row=1, column=1)
-
-        ttk.Label(export_frame, text="Due Date:").grid(row=2, column=0, sticky="w")
-        self.due_date_entry = DateEntry(export_frame, textvariable=self.due_date, date_pattern="yyyy-mm-dd")
-        self.due_date_entry.grid(row=2, column=1)
-
-        ttk.Label(export_frame, text="Start Date:").grid(row=3, column=0, sticky="w")
-        self.start_date_entry = DateEntry(export_frame, textvariable=self.start_date, date_pattern="yyyy-mm-dd")
-        self.start_date_entry.grid(row=3, column=1)
-
-        ttk.Label(export_frame, text="End Date:").grid(row=4, column=0, sticky="w")
-        self.end_date_entry = DateEntry(export_frame, textvariable=self.end_date, date_pattern="yyyy-mm-dd")
-        self.end_date_entry.grid(row=4, column=1)
-
-        ttk.Checkbutton(export_frame, text="Errors Only", variable=self.errors_only).grid(row=5, columnspan=2)
-
-        # User email frame
-        email_frame = ttk.LabelFrame(self.root, text="User Emails")
-        email_frame.pack(pady=10)
-
-        ttk.Label(email_frame, text="User IDs:").grid(row=0, column=0, sticky="w")
-        ttk.Entry(email_frame, textvariable=self.user_ids).grid(row=0, column=1)
-
-        # Checkbutton for fetching all attributes
-        self.fetch_all_checkbutton = ttk.Checkbutton(email_frame, text="Fetch All Attributes",
-                                                     variable=self.fetch_all_attributes)
-        self.fetch_all_checkbutton.grid(row=0, column=2)
-
-        ttk.Button(email_frame, text="Fetch Emails", command=self.fetch_emails).grid(row=0, column=3)
-
-        # Export button
-        ttk.Button(self.root, text="Export Triggers", command=self.export_triggers).pack(pady=10)
-
-    def load_config(self):
+    # Фильтрация триггеров по временному периоду
+    filtered_triggers = []
+    for trigger in triggers:
+        last_change_timestamp = int(trigger['lastchange'])
         try:
-            with open('config.json', 'r') as f:
-                self.config = json.load(f)
-        except FileNotFoundError:
-            self.config = {}
-        except json.JSONDecodeError:
-            self.config = {}  # Handle corrupted config file gracefully
+            last_change_date = datetime.datetime.fromtimestamp(last_change_timestamp)
+        except OSError as e:
+            print(f"Error converting timestamp for trigger: {trigger['description']}, Error: {e}")
+            continue
 
-    def save_config(self):
-        with open('config.json', 'w') as f:
-            json.dump(self.config, f)
+        if period_start and period_start > last_change_date:
+            continue
+        if period_end and period_end < last_change_date:
+            continue
 
-    def fetch_emails(self):
-        zabbix_server = self.zabbix_server.get()
-        zabbix_user = self.zabbix_user.get()
-        zabbix_password = self.zabbix_password.get()
+        filtered_triggers.append(trigger)
 
-        try:
-            zapi = ZabbixAPI(zabbix_server)
-            zapi.login(zabbix_user, zabbix_password)
-        except Exception as e:
-            tk.messagebox.showerror("Error", f"Failed to log in to Zabbix: {e}")
-            return
+    return filtered_triggers
 
-        user_ids = self.user_ids.get().split(',')
-        self.user_emails = {}
+def fetch_triggers():
+    url = url_entry.get()
+    user = user_entry.get()
+    password = password_entry.get()
+    group = group_entry.get()
+    host = host_entry.get()
+    start_date = start_date_entry.get()
+    end_date = end_date_entry.get()
 
-        fetch_all_attributes = self.fetch_all_attributes.get()
+    if not url or not user or not password:
+        messagebox.showwarning('Warning', 'Please enter Zabbix URL, username, and password.')
+        return
 
-        for user_id in user_ids:
-            user_filter = {'userid': user_id}
+    zabbix_api = ZabbixAPI(url)
+    zabbix_api.use_ssl = True  # Используем SSL поддержку
 
-            if fetch_all_attributes:
-                user = zapi.user.get(output='extend', filter=user_filter)
-            else:
-                user = zapi.user.get(output=['email'], filter=user_filter)
+    try:
+        zabbix_api.login(user, password)
+    except ZabbixAPIException as e:
+        messagebox.showerror('Error', f'Error logging in: {e}')
+        return
 
-            if user and user[0].get('email'):
-                self.user_emails[user_id] = user[0]['email']
-            else:
-                tk.messagebox.showwarning("Warning", f"Email not found for user ID: {user_id}")
+    try:
+        period_start = datetime.datetime.strptime(start_date, '%Y-%m-%d') if start_date else None
+        period_end = datetime.datetime.strptime(end_date, '%Y-%m-%d') if end_date else None
+    except ValueError:
+        messagebox.showerror('Error', 'Invalid date format. Please use YYYY-MM-DD.')
+        return
 
-        # Display fetched emails in a popup window
-        self.show_emails_popup()
+    triggers = get_triggers(zabbix_api, group=group, host=host, period_start=period_start, period_end=period_end)
 
-        self.save_config()
+    if triggers:
+        save_to_excel(triggers)
+        messagebox.showinfo('Information', 'Data saved to Excel file.')
+    else:
+        messagebox.showinfo('Information', 'No triggers found matching the criteria.')
 
-    def show_emails_popup(self):
-        popup = tk.Toplevel(self.root)
-        popup.title("Fetched Emails")
-
-        listbox = tk.Listbox(popup)
-        for user_id, email in self.user_emails.items():
-            listbox.insert(tk.END, f"User ID: {user_id}, Email: {email}")
-
-        listbox.pack(padx=10, pady=10)
-
-    def export_triggers(self):
-        zabbix_server = self.zabbix_server.get()
-        zabbix_user = self.zabbix_user.get()
-        zabbix_password = self.zabbix_password.get()
-
-        group_id = self.group_id.get() if self.group_id.get() else None
-        server_name = self.server_name.get() if self.server_name.get() else None
-        due_date = self.due_date.get() if self.due_date.get() else None
-        start_date = self.start_date.get() if self.start_date.get() else None
-        end_date = self.end_date.get() if self.end_date.get() else None
-        errors_only = self.errors_only.get()
-
-        zapi = ZabbixAPI(zabbix_server)
-        zapi.login(zabbix_user, zabbix_password)
-
-        # Function to get triggers based on group ID or server name and due date
-        def get_triggers(zapi, group_id=None, server_name=None, due_date=None, errors_only=False):
-            filter_dict = {}
-            if group_id is not None:
-                filter_dict['group'] = group_id
-            if server_name:
-                filter_dict['host'] = server_name
-            if due_date:
-                filter_dict['value'] = due_date
-
-            if errors_only:
-                filter_dict['value'] = '1'
-
-            return zapi.trigger.get(output=['triggerid', 'description', 'value'], filter=filter_dict)
-
-        # Convert due date string to epoch time if provided
-        due_date_epoch = None
-        if due_date:
-            due_date_dt = datetime.strptime(due_date, '%Y-%m-%d')
-            due_date_epoch = int(due_date_dt.timestamp())
-
-        # Get list of triggers based on due date
-        if due_date:
-            triggers = get_triggers(zapi, group_id=group_id, server_name=server_name, due_date=due_date_epoch,
-                                    errors_only=errors_only)
-        # Get list of triggers based on date range
-        else:
-            start_date_epoch = None
-            end_date_epoch = None
-            if start_date:
-                start_date_dt = datetime.strptime(start_date, '%Y-%m-%d')
-                start_date_epoch = int(start_date_dt.timestamp())
-            if end_date:
-                end_date_dt = datetime.strptime(end_date, '%Y-%m-%d')
-                end_date_epoch = int((end_date_dt + timedelta(days=1)).timestamp())
-
-            triggers = get_triggers(zapi, group_id=group_id, server_name=server_name, start_date=start_date_epoch,
-                                    end_date=end_date_epoch, errors_only=errors_only)
-
-        # Create an Excel workbook
-        wb = Workbook()
-        ws = wb.active
-
-        # Write headers
-        ws.append(['Trigger ID', 'Description', 'Value', 'User Email'])
-
-        # Apply color formatting to triggers with value = 1
-        red_fill = PatternFill(start_color='FFFF0000', end_color='FFFF0000', fill_type='solid')
-        for trigger in triggers:
-            trigger_id = trigger['triggerid']
-            description = trigger['description']
-            value = trigger['value']
-            user_id = trigger.get('userid', '')
-            user_email = self.user_emails.get(user_id, '') if user_id else ''
-            ws.append([trigger_id, description, value, user_email])
-            if value == '1':
-                ws[f'C{ws.max_row}'].fill = red_fill
-
-        # Save the workbook
-        filename = filedialog.asksaveasfilename(defaultextension=".xlsx", filetypes=[("Excel files", "*.xlsx")])
-        if filename:
-            wb.save(filename)
-
-        # Log out from Zabbix API
-        zapi.user.logout()
-
-        # Save the configuration
-        self.config['server'] = zabbix_server
-        self.config['user'] = zabbix_user
-        self.config['password'] = zabbix_password
-        self.config['group_id'] = group_id
-        self.config['server_name'] = server_name
-        self.config['due_date'] = due_date
-        self.config['start_date'] = start_date
-        self.config['end_date'] = end_date
-        self.config['errors_only'] = errors_only
-        self.config['user_ids'] = self.user_ids.get()
-        self.config['fetch_all_attributes'] = self.fetch_all_attributes.get()
-        self.save_config()
+    save_settings()
 
 
-if __name__ == "__main__":
-    root = tk.Tk()
-    app = ZabbixExportGUI(root)
-    root.mainloop()
+def save_to_excel(triggers):
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.append(['Description', 'Last Change', 'Priority', 'Value', 'Hosts'])
+
+    for trigger in triggers:
+        # Преобразуем значение 'hosts' в строку для сохранения в Excel
+        hosts_str = ', '.join([host['host'] for host in trigger['hosts']])
+
+        # Преобразуем timestamp в формат даты и времени
+        last_change_date = datetime.datetime.fromtimestamp(int(trigger['lastchange']))
+
+        ws.append([trigger['description'], last_change_date, trigger['priority'], trigger['value'], hosts_str])
+
+    wb.save('triggers.xlsx')
+
+def save_settings():
+    with open('settings.txt', 'w') as f:
+        f.write(f"URL={url_entry.get()}\n")
+        f.write(f"User={user_entry.get()}\n")
+        f.write(f"Password={password_entry.get()}\n")
+        f.write(f"Group={group_entry.get()}\n")
+        f.write(f"Host={host_entry.get()}\n")
+        f.write(f"Start Date={start_date_entry.get()}\n")
+        f.write(f"End Date={end_date_entry.get()}\n")
+
+def load_settings():
+    try:
+        with open('settings.txt', 'r') as f:
+            settings = {}
+            for line in f:
+                key, value = line.strip().split('=')
+                settings[key] = value
+
+            url_entry.insert(0, settings.get('URL', ''))
+            user_entry.insert(0, settings.get('User', ''))
+            password_entry.insert(0, settings.get('Password', ''))  # Загружаем пароль
+            group_entry.insert(0, settings.get('Group', ''))
+            host_entry.insert(0, settings.get('Host', ''))
+            start_date_entry.insert(0, settings.get('Start Date', ''))  # Загружаем дату начала
+            end_date_entry.insert(0, settings.get('End Date', ''))  # Загружаем дату окончания
+    except FileNotFoundError:
+        pass
+
+# Создание основного окна
+root = tk.Tk()
+root.title('Zabbix Trigger Fetcher')
+
+# Создание и размещение элементов управления
+tk.Label(root, text="Zabbix URL:").pack()
+url_entry = tk.Entry(root)
+url_entry.pack()
+
+tk.Label(root, text="Username:").pack()
+user_entry = tk.Entry(root)
+user_entry.pack()
+
+tk.Label(root, text="Password:").pack()
+password_entry = tk.Entry(root, show="*")
+password_entry.pack()
+
+tk.Label(root, text="Group Name:").pack()
+group_entry = tk.Entry(root)
+group_entry.pack()
+
+tk.Label(root, text="Host Name:").pack()
+host_entry = tk.Entry(root)
+host_entry.pack()
+
+tk.Label(root, text="Start Date (YYYY-MM-DD):").pack()
+start_date_entry = tk.Entry(root)
+start_date_entry.pack()
+
+tk.Label(root, text="End Date (YYYY-MM-DD):").pack()
+end_date_entry = tk.Entry(root)
+end_date_entry.pack()
+
+fetch_button = tk.Button(root, text="Fetch Triggers", command=fetch_triggers)
+fetch_button.pack()
+
+load_settings()
+
+root.mainloop()
